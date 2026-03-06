@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Inforack PDF Signer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; background: #f4f7f6; }
+        
+        /* Custom Status Box (Replaces Alert) */
+        #status-box { 
+            width: 100%; max-width: 800px; padding: 15px; margin-bottom: 10px; 
+            border-radius: 8px; display: none; text-align: center; font-weight: bold;
+        }
+        .status-info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .status-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+
+        .toolbar { background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 15px; width: 100%; max-width: 800px; text-align: center;}
+        #viewer-container { position: relative; border: 1px solid #333; background: white; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        #sig-marker { 
+            position: absolute; width: 150px; height: 50px; border: 2px dashed #e74c3c; 
+            background: rgba(231, 76, 60, 0.1); display: none; pointer-events: none; 
+            color: #e74c3c; font-weight: bold; text-align: center; line-height: 50px; z-index: 10;
+        }
+        canvas { cursor: crosshair; }
+        button { padding: 10px 20px; background: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin: 0 5px; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+<div id="status-box"></div>
+
+<div class="toolbar">
+    <input type="file" id="pdf-file" accept=".pdf" style="margin-bottom: 10px;"><br>
+    <button id="prev">« Previous</button>
+    <span class="page-info">Page: <span id="page-num">0</span> / <span id="page-count">0</span></span>
+    <button id="next">Next »</button>
+    <button id="sign-btn" disabled style="background: #2980b9;">Sign & Log Data</button>
+</div>
+
+<div id="viewer-container">
+    <div id="sig-marker">SIGN HERE</div>
+    <canvas id="pdf-render"></canvas>
+</div>
+
+<script>
+    const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbz-rxOvFnOt-8E6Tlo9Key7V5RzaggD9jIhRwTBW0RhONASiiUu_Q9MzqvxQens0dM_IA/exec'; 
+    
+    const pdfjsLib = window['pdfjs-dist/build/pdf'];
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    let pdfDoc = null, pageNum = 1, currentFileName = "";
+    let selectedPos = { x: 0, y: 0, page: 1 };
+    const canvas = document.getElementById('pdf-render');
+    const ctx = canvas.getContext('2d');
+    const statusBox = document.getElementById('status-box');
+
+    function showStatus(msg, type) {
+        statusBox.innerText = msg;
+        statusBox.className = type === 'success' ? 'status-success' : 'status-info';
+        statusBox.style.display = 'block';
+    }
+
+    // Load PDF
+    document.getElementById('pdf-file').addEventListener('change', e => {
+        const file = e.target.files[0];
+        if (!file) return;
+        currentFileName = file.name;
+        const reader = new FileReader();
+        reader.onload = function() {
+            pdfjsLib.getDocument(new Uint8Array(this.result)).promise.then(pdf => {
+                pdfDoc = pdf;
+                document.getElementById('page-count').textContent = pdf.numPages;
+                renderPage(1);
+                showStatus("PDF Loaded. Click anywhere on the page to set signature location.", "info");
+            });
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    function renderPage(num) {
+        pdfDoc.getPage(num).then(page => {
+            const viewport = page.getViewport({ scale: 1.5 });
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+            page.render({ canvasContext: ctx, viewport: viewport });
+            document.getElementById('page-num').textContent = num;
+            document.getElementById('sig-marker').style.display = 'none';
+        });
+    }
+
+    // Capture Location
+    canvas.addEventListener('click', e => {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const marker = document.getElementById('sig-marker');
+        marker.style.display = 'block';
+        marker.style.left = x + 'px';
+        marker.style.top = y + 'px';
+
+        selectedPos = { x: Math.round(x), y: Math.round(canvas.height - y), page: pageNum };
+        document.getElementById('sign-btn').disabled = false;
+        showStatus("Location set! Click 'Sign & Log Data' to continue.", "info");
+    });
+
+    async function handleSignAndLog() {
+        showStatus("Processing... Please wait.", "info");
+
+        // 1. DATA LOGGING
+        fetch(GOOGLE_SCRIPT_URL, {
+            method: 'POST',
+            mode: 'no-cors',
+            body: JSON.stringify({
+                fileName: currentFileName,
+                page: selectedPos.page,
+                x: selectedPos.x,
+                y: selectedPos.y
+            })
+        });
+
+        // 2. TRIGGER PROXKEY (via PostMessage Bridge)
+        window.postMessage({
+            "source": "host-page",
+            "extension": "SignerDigital",
+            "method": "SignPDF",
+            "params": {
+                "SType": "Visible",
+                "PNum": selectedPos.page.toString(),
+                "X": selectedPos.x.toString(),
+                "Y": selectedPos.y.toString(),
+                "H": "50", "W": "150",
+                "Token": "ProxKey"
+            }
+        }, "*");
+
+        showStatus("Request Sent! Check your Taskbar for the ProxKey PIN window.", "success");
+    }
+
+    document.getElementById('sign-btn').onclick = handleSignAndLog;
+    document.getElementById('prev').onclick = () => { if(pageNum > 1) renderPage(--pageNum); };
+    document.getElementById('next').onclick = () => { if(pageNum < pdfDoc.numPages) renderPage(++pageNum); };
+</script>
+</body>
+</html>
